@@ -1,3 +1,4 @@
+import json
 from datetime import datetime,timezone
 from decimal import Decimal
 from fastapi import HTTPException
@@ -13,7 +14,12 @@ def get(s,model,id,lock=False):
     if not x:raise HTTPException(404,'记录不存在')
     return x
 def audit(s,u,action,detail):s.add(Audit(actor=u['email'],action=action,detail=str(detail),at=datetime.now(timezone.utc).isoformat()))
-def sample_view(s,x):return {**obj(x),'tank_code':s.get(Tank,x.tank_id).code,'grade':s.get(Tank,x.tank_id).grade}
+def sample_view(s,x):
+    data={**obj(x),'tank_code':s.get(Tank,x.tank_id).code,'grade':s.get(Tank,x.tank_id).grade}
+    try:
+        ev=json.loads(x.evidence or '{}');data['plan']=ev.get('plan')
+    except ValueError:data['plan']=None
+    return data
 def transfer_view(s,x):
     sample=s.get(FuelSample,x.sample_id);tank=s.get(Tank,sample.tank_id)
     return {**obj(x),'sample_code':sample.code,'tank_code':tank.code,'tank_liters':float(tank.liters)}

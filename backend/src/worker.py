@@ -1,23 +1,49 @@
-import os,time,json
+import logging
+import os
+import time
 from pathlib import Path
+
 from redis import Redis
-from sqlalchemy import select
-from .database import Session
-from .models import FuelSample
-from .density_model import compare
-r=Redis.from_url(os.getenv('REDIS_URL','redis://redis:6379/0'),decode_responses=True)
+
+from .plan_service import process_job, process_next_job, recover_jobs, train_next
+
+logging.basicConfig(level=logging.INFO)
+r = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+HEARTBEAT = Path(os.getenv("HEARTBEAT_PATH", "/artifacts/bunker-heartbeat"))
+
+recovered = False
+
 while True:
-    Path('/artifacts/bunker-heartbeat').write_text(str(time.time()))
-    item=r.blpop('density-check',timeout=2)
-    if not item:continue
-    id=int(item[1])
+    HEARTBEAT.write_text(str(time.time()))
+    if not recovered:
+        try:
+            recover_jobs()
+            recovered = True
+        except Exception:
+            logging.exception("startup recovery failed, retrying")
+            time.sleep(2)
+            continue
     try:
-        with Session.begin() as s:
-            x=s.scalar(select(FuelSample).where(FuelSample.id==id).with_for_update())
-            if not x or x.status!='queued':continue
-            x.log_density,x.threshold,passed,ev=compare(s,x);x.status='qualified'if passed else'anomaly';x.evidence=json.dumps(ev,ensure_ascii=False)
-            Path(f'/artifacts/sample-{id}-evidence.json').write_text(x.evidence)
-    except Exception as e:
-        with Session.begin() as s:
-            x=s.get(FuelSample,id)
-            if x:x.status='failed';x.evidence=str(e)
+        if train_next():
+            continue
+    except Exception:
+        logging.exception("density plan training pass failed")
+        time.sleep(2)
+        continue
+    item = r.blpop("density-check", timeout=2)
+    if not item:
+        # Also drains jobs committed just before a crash without a queue entry.
+        try:
+            process_next_job()
+        except Exception:
+            logging.exception("queued comparison sweep failed")
+        continue
+    try:
+        job_id = int(item[1])
+    except (TypeError, ValueError):
+        continue
+    try:
+        process_job(job_id)
+    except Exception:
+        # A job left running is re-queued by the next boot recovery pass.
+        logging.exception("comparison job %s failed, left for recovery", job_id)

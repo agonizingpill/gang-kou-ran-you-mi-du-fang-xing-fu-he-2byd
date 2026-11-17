@@ -19,17 +19,19 @@ docker compose exec -T backend python -m scripts.seed_demo
 |---|---|---|---|
 |admin 调拨主管|admin@chenggang.local|Harbor2026!|登记/暂停/恢复储罐、固定罐容密度基准、化验、调拨放行、收油入罐与对账结案|
 |chemist 化验员|chemist@chenggang.local|Harbor2026!|收样、比对、复检、申请调拨；收油计划/化验核对、计量记录/调查依据；不能签放行、入罐或结案|
-|viewer 船代观察员|viewer@chenggang.local|Harbor2026!|只读九页、规格和交接记录|
+|viewer 船代观察员|viewer@chenggang.local|Harbor2026!|只读十页、规格和交接记录|
 
-## 九个业务模块
+## 十个业务模块
 
 - 罐区日志：罐号唯一、等级固定、Decimal升数非负；主管可暂停调拨。暂停不影响化验，申请和放行都会拦截。
 - 收样登记：每瓶FuelSample有来源Tank外键、唯一编号、15℃密度、黏度、硫；待测样与参考样明确分开。
-- 密度与复检：Python worker仅用同等级reference=True样拟合。异常样补复检密度和文字说明，原始读数保留。复检仍超等级规格时状态rejected，申请会拒绝；通过规格后retested。任何调拨引用会冻结该油样复检。
+- 密度与复检：受理时从在用方案固定方案版本与该等级参考快照，worker按快照打分，排队期间换版不改变本单依据。异常样补复检密度和文字说明，原始读数保留。复检仍超等级规格时状态rejected，申请会拒绝；通过规格后retested。任何调拨引用会冻结该油样复检。
 - 调拨放行：申请时必须合格且不超当前罐量；复制等级/密度/黏度/硫快照。申请不预留油量；主管放行锁Transfer和Tank、复核状态及规格、原子扣减。超量、罐暂停、重复放行均不会扣量。
 
 - 到港补罐验收：TankReceipt计划→化验核对→主管入罐；等级须同罐、密度/黏度/硫均符合规格，最终入罐再次查active状态与剩余罐容。TankCapacity一对一记录罐容及存油密度，主管只可建立一次，容量≥当前存量、密度符合本等级，禁止覆盖初始基准。入罐锁收油单与Tank，再更新体积和加权密度，重复入罐拒绝；保存入罐前后体积、密度、签署人快照。新罐可在本页折叠表单建基准，历史未配置的罐仍可原流程调拨，收油则须先补基准。
 - 船舶计量对账：只对released调拨登记表前/表后和船收量，表后必须递增。分别以调拨量作分母计算表计及船收差率，绝对值≤1%为matched，否则variance。超差必须≥8字调查依据才可由主管结案；结案快照冻结表底、差率、调拨化验、调查和签署人。对账不再次改罐量，不能重复登记或结案。
+
+- 参考方案版本：主管从现有reference样挑选VLSFO/MGO两套参考集建立候选方案，worker快照参考样后双等级分别训练。任一等级不足20条、密度无变化或训练失败，整份候选不可发布，在用方案不变。主管凭页面所见在用版本号发布或回滚，期间他人换版则拒绝；已发布方案与失败候选的参考集都不可回改（保证可复现），参考变化须另建候选。升级后若尚未生成任何方案，比对会提示先由主管建立并发布；seed演示会建立基线方案并在双等级训练成功后自动启用。版本差异按业务油样重算旧/新阈值与判定，可逐样查看是否翻判。
 
 参考样不可申请实船调拨，也不会被业务收样接口写成参考样。调拨存在独立化验快照，防止后续修订改变已放行依据。
 
@@ -39,11 +41,13 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 16:30到港收油计划RC-DEMO-17为TK-06补5000L，15℃密度985、黏度130、硫0.35%；主管核对100000L罐容后入罐，若当前存量15000L/密度975，更新至20000L/加权密度977.5，原后数均有快照。17:00对TR-26017放行5000L核表10000→15100、船收4900L，差率+2%/-2%；未调查主管结案被拒，补温度补偿与船舱测深复核依据后主管签结。TK-06罐量不因对账再次改变。
 
+参考库换版不在日常放行页办理：主管在参考方案页挑选现有参考样建立候选方案，双等级训练完成后查看与基线方案的逐样判定差异，再凭页面rev号发布；若期间他人已换版，本次操作被拒并须重新审批。
+
 ## 算法与规格
 
 seed42生成120条固定参考样，VLSFO/MGO各60；它们有独立等级与密度范围。对单个等级的参考密度`StandardScaler`后拟合`KernelDensity(kernel='gaussian',bandwidth=.3)`。将参考样自身log likelihood第5分位作为低似然阈值；待测样只调用transform/score_samples，不进入fit。返回等级、参考编号/数值、参考数、阈值、待测分数、70点物理量纲概率密度曲线，均由worker实际计算。
 
-原样合格需同时达到KDE阈值和等级规格。KDE判异表示需要复测，不直接代表成品不可用。复检记录经化验员签注、达到等级硬规格可人工解除异常；这里不对复检值二次做自动KDE拒绝。等级演示内控值：VLSFO密度925–1010、黏度10–380、硫≤0.5%；MGO密度820–890、黏度1–12、硫≤0.1%。密度kg/m³@15℃，黏度mm²/s。这些是本场景演示值，并非完整海事检验标准。参考不足20条或无变化时失败，原样未合格不能调拨。
+原样合格需同时达到KDE阈值和等级规格；阈值来自受理时固定方案的参考快照，而非临时现取。KDE判异表示需要复测，不直接代表成品不可用。复检记录经化验员签注、达到等级硬规格可人工解除异常；这里不对复检值二次做自动KDE拒绝。等级演示内控值：VLSFO密度925–1010、黏度10–380、硫≤0.5%；MGO密度820–890、黏度1–12、硫≤0.1%。密度kg/m³@15℃，黏度mm²/s。这些是本场景演示值，并非完整海事检验标准。参考不足20条或无变化时失败，原样未合格不能调拨。
 
 ## 技术与职责
 
@@ -55,11 +59,13 @@ seed42生成120条固定参考样，VLSFO/MGO各60；它们有独立等级与密
 |数据|PostgreSQL16，外键/唯一键/范围约束，Decimal体积与化验值|
 |横切|JWT8小时/PBKDF2/三角色、业务审计、请求追踪、全局错误恢复|
 
-`backend/src/models.py`为Tank/FuelSample/Transfer；`schemas.py`请求范围；`density_model.py`按级KDE与规格函数；`transfer_service.py`资格/复检/化验快照与锁罐放行；`worker.py`队列/心跳；`main.py`路由；`middlewares.py`两个中间件。`backend/scripts/seed_demo.py`按自然键只补缺失记录，不覆盖修改。
+`backend/src/models.py`为Tank/FuelSample/Transfer；`schemas.py`请求范围；`density_model.py`提供等级硬规格函数；`transfer_service.py`资格/复检/化验快照与锁罐放行；`worker.py`队列/心跳；`main.py`路由；`middlewares.py`两个中间件。`backend/scripts/seed_demo.py`按自然键只补缺失记录，不覆盖修改。
 
 `backend/src/receipt_models.py`新增TankCapacity/TankReceipt/LoadingReconciliation三张关联表，原表列不变；`receipt_schemas.py`校验罐基准、收油测值和表计输入；`receipt_service.py`锁罐入量、加权密度、调查结案；`receipt_routes.py`提供`/tank-capacities`、`/tank-receipts`及`/loading-reconciliations`。create_all非破坏性建表，旧数据无需改列迁移。
 
-前端`pages/tanks.js`、`samples.js`、`evidence.js`、`transfers.js`分别处理罐、收样、分布复检、调拨；新增`receipts.js`收油计划/罐容基准/核对入罐，`reconciliations.js`船岸表计与调查结案。`components/logbook.js`共享shell/heading/sampleTag/tankTag/notice；样品状态标签在收样和复检复用；`utils/api.js`会话/API/store，`utils/format.js`数字/转义/上海时间。角色、油样状态、收油状态、对账状态在`backend/src/constants.py`与`frontend/src/constants.js`定义；等级规格在backend constants及GET /grades供页面复用；角色和状态实际使用处为security.py/main.py/worker.py/transfer_service.py以及前端页面。
+`backend/src/plan_models.py`新增DensityPlan/DensityPlanModel/DensityPlanReference/DensityPlanSetting/DensityPlanEvent/ComparisonJob；`plan_service.py`负责参考快照、双等级训练、产物原子写入与校验、发布回滚版本校验、受理固定方案与崩溃恢复；`plan_routes.py`提供`/density-plans`、`/density-plans/{id}/publish|rollback|retrain|diff`、`/density-plan-setting`、`/comparison-jobs`、`/reference-samples`。`worker.py`启动时恢复running比对、续训未完成方案，并扫描队列外的queued任务。
+
+前端`pages/tanks.js`、`samples.js`、`evidence.js`、`transfers.js`分别处理罐、收样、分布复检、调拨；`plans.js`参考方案建立、训练重试、发布/回滚与版本差异；新增`receipts.js`收油计划/罐容基准/核对入罐，`reconciliations.js`船岸表计与调查结案。`components/logbook.js`共享shell/heading/sampleTag/tankTag/notice；样品状态标签在收样和复检复用；`utils/api.js`会话/API/store，`utils/format.js`数字/转义/上海时间。角色、油样状态、收油状态、对账状态在`backend/src/constants.py`与`frontend/src/constants.js`定义；等级规格在backend constants及GET /grades供页面复用；角色和状态实际使用处为security.py/main.py/worker.py/transfer_service.py以及前端页面。
 
 五服务frontend/backend/worker/db/redis有独立健康检查；backend/worker依赖db/redis healthy，前端等待backend。命名卷db-data/redis-data/artifacts；worker共享卷保存模型证据和心跳。Nginx /api/剥前缀代理，后端路由无/api双重前缀。`.env.example`提供COMPOSE_PROJECT_NAME、三端口、JWT_SECRET、DOCKER_SUBNET；内部DATABASE_URL/REDIS_URL/SEED_DEMO在Compose设置。由于宿主默认地址池耗尽，显式10.221.29.0/24，可通过DOCKER_SUBNET改为无冲突网段。
 
@@ -67,7 +73,7 @@ seed42生成120条固定参考样，VLSFO/MGO各60；它们有独立等级与密
 
 ## 已知范围
 
-不接储罐计量仪、真实化验仪、船代通知或物理阀门。到港收油按体积加权计算15℃密度，没有温度体积换算或管线存油修正；初始密度是主管计量基准，后续出油按均质假设不改存油密度。新增收油不会污染KDE参考，也不会自动使旧油样过期；生产环境应增加新罐存量取样与有效期联动。船岸超差可留调查依据结案，但不自动补量/退款或判定责任。复检为密度和人工说明，黏度/硫沿用原样，未实现照片或签名证书上传。参考与待测均为模拟数据，KDE分数是参考相似性，不是合格概率；规格仅覆盖三项演示内控。单worker/Redis list，无任务取出后进程崩溃的可靠重投。已放行调拨不可撤销返罐；申请不预扣，最终不足会被拒。演示账号与JWT密钥部署前替换。
+不接储罐计量仪、真实化验仪、船代通知或物理阀门。到港收油按体积加权计算15℃密度，没有温度体积换算或管线存油修正；初始密度是主管计量基准，后续出油按均质假设不改存油密度。新增收油不会污染KDE参考，也不会自动使旧油样过期；生产环境应增加新罐存量取样与有效期联动。船岸超差可留调查依据结案，但不自动补量/退款或判定责任。复检为密度和人工说明，黏度/硫沿用原样，未实现照片或签名证书上传。参考与待测均为模拟数据，KDE分数是参考相似性，不是合格概率；规格仅覆盖三项演示内控。比对任务受理即落库并固定方案；worker重启时把running任务重排队（最多3次），并补扫队列外的queued任务，因此进程崩溃不会丢判定依据，但Redis列表本身仍未做消费确认。已放行调拨不可撤销返罐；申请不预扣，最终不足会被拒。方案训练为单worker串行、按方案行锁互斥；训练中断会保留半成品方案但绝不发布，重启后续训补齐两等级。发布/回滚使用乐观版本号，不做页面以外的冲突合并。版本差异只重算KDE判定，不改历史已出具化验与调拨快照。演示账号与JWT密钥部署前替换。
 
 License: MIT.
 
@@ -80,6 +86,6 @@ License: MIT.
 
 正式调拨放行必须同时满足两项新前置。历史已released记录保持原状；旧requested单须补许可和窗口。主管在管线页填写至少8字完工依据可释放管线与泊位一次；船岸计量对账结案也自动完成同一资源释放，重复不再动库存。已完成窗口仍保留在重叠历史中。
 
-新增后端harbor_models/schemas/service/routes.py及前端pages/lines.js、windows.js、retention.js，6张关联表由create_all补建，原表无新增列。seed只按自然键补两条输油管线和两座泊位，双跑不覆盖在用状态、许可、预约或检验记录。登录后导航共9页，前端仍为原生HTML/CSS/JS。
+新增后端harbor_models/schemas/service/routes.py及前端pages/lines.js、windows.js、retention.js，6张关联表由create_all补建，原表无新增列。seed只按自然键补两条输油管线和两座泊位，双跑不覆盖在用状态、许可、预约或检验记录。登录后导航共9页（V3时点），新增参考方案页后共10页，前端仍为原生HTML/CSS/JS。
 
 V3范围：清线量与完工依据来自人工记录，不控制泵阀；时间按用户北京时间输入、后端保存UTC，页面标注UTC；额定流量只做窗口容量检查，未模拟泵速/温度补偿/实时船位。泊位当前无取消/改期功能，计划错误须新调拨，已完成历史区间保持占位证据。留样无温控传感器、封条照片、物流或检测报告附件；委托密度是人工外部报告，不重新训练KDE，不判定法律责任。详细真实证据见test-artifacts/gb-1029/v3。

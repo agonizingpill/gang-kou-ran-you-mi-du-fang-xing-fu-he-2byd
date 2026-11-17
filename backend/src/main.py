@@ -10,6 +10,7 @@ from .models import User,Tank,FuelSample,Transfer,Audit
 from .schemas import Login,TankIn,TankState,SampleIn,RetestIn,TransferIn
 from .security import current,allow,password_hash,token_for
 from .transfer_service import obj,get,audit,sample_view,transfer_view,retest,request_transfer,release
+from .plan_service import accept_comparison
 from .constants import GRADES
 from .middlewares import RequestTrace,Recovery
 from scripts.seed_demo import seed
@@ -21,12 +22,17 @@ async def lifespan(app):
     if os.getenv('SEED_DEMO','true')=='true':
         try:seed()
         except Exception:logging.exception('seed failed')
+    from .plan_service import ensure_setting
+    ensure_setting()
     yield
 app=FastAPI(title='澄港 · 油样放行簿',lifespan=lifespan);app.add_middleware(RequestTrace);app.add_middleware(Recovery)
 from .receipt_routes import router as receipt_router
 app.include_router(receipt_router)
 from .harbor_routes import router as harbor_router
 app.include_router(harbor_router)
+from .plan_routes import router as plan_router
+app.include_router(plan_router)
+
 @app.exception_handler(IntegrityError)
 async def duplicate(request,e):return JSONResponse({'detail':'编号已存在或关联记录不合法'},status_code=409)
 @app.get('/health')
@@ -66,10 +72,9 @@ def add_sample(d:SampleIn,u=Depends(current)):
 def compare_sample(id:int,u=Depends(current)):
     allow(u,'admin','chemist')
     with Session.begin() as s:
-        x=get(s,FuelSample,id,True)
-        if x.reference or x.status not in ['received','failed']:raise HTTPException(409,'该样品已比对或不可重新计算')
-        x.status='queued';audit(s,u,'sample_compared',x.code)
-    r.rpush('density-check',id);return {'status':'queued'}
+        job=accept_comparison(s,get(s,FuelSample,id,True),u)
+    r.rpush('density-check',job.id)
+    return {'status':'queued','job_id':job.id,'plan_id':job.plan_id,'plan_code':job.plan_code,'plan_revision':job.plan_revision}
 @app.put('/samples/{id}/retest')
 def retest_sample(id:int,d:RetestIn,u=Depends(current)):
     allow(u,'admin','chemist')
@@ -88,3 +93,9 @@ def release_transfer(id:int,u=Depends(current)):
 @app.get('/audit')
 def audit_logs(u=Depends(current)):
     with Session() as s:return [obj(x)for x in s.scalars(select(Audit).order_by(Audit.id.desc()).limit(35))]
+@app.get('/reference-samples')
+def reference_samples(u=Depends(current)):
+    from .models import Tank as T
+    with Session() as s:
+        rows=s.scalars(select(FuelSample).join(T,FuelSample.tank_id==T.id).where(FuelSample.reference==True).order_by(T.grade,FuelSample.id)).all()
+        return [{'id':x.id,'code':x.code,'grade':s.get(T,x.tank_id).grade,'tank_code':s.get(T,x.tank_id).code,'density_15':float(x.density_15),'viscosity':float(x.viscosity),'sulfur':float(x.sulfur)}for x in rows]
